@@ -1,105 +1,134 @@
 package com.zhaoyuan.calendarmemo.viewmodel
 
-import android.content.Context
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.zhaoyuan.calendarmemo.data.repository.AiRepository
+import com.zhaoyuan.calendarmemo.data.repository.CalendarRepository
 import com.zhaoyuan.calendarmemo.model.CalendarEvent
-import com.zhaoyuan.calendarmemo.model.CalendarEventModel
 import com.zhaoyuan.calendarmemo.widget.TodayEventsWidgetProvider
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
-class CalendarEventViewModel : ViewModel() {
+class CalendarEventViewModel(
+    application: Application,
+    private val calendarRepository: CalendarRepository,
+    private val aiRepository: AiRepository
+) : AndroidViewModel(application) {
 
-    private val calendarEventModel = CalendarEventModel()
+    constructor(application: Application) : this(
+        application,
+        CalendarRepository(),
+        AiRepository()
+    )
 
-    // 事件列表
-    private val _events = MutableLiveData<List<CalendarEvent>>()
-    val events: LiveData<List<CalendarEvent>> get() = _events
+    private val appContext = application.applicationContext
 
-    // 删除状态
-    private val _isEventDeleted = MutableLiveData<Boolean>()
-    val isEventDeleted: LiveData<Boolean> get() = _isEventDeleted
+    private val _uiState = MutableStateFlow(CalendarUiState())
+    val uiState: StateFlow<CalendarUiState> = _uiState.asStateFlow()
 
-    // 编辑状态
-    private val _isEventUpdated = MutableLiveData<Boolean>()
-    val isEventUpdated: LiveData<Boolean> get() = _isEventUpdated
-
-    // 加载事件
-    fun loadEvents(context: Context) {
+    fun loadEvents() {
         viewModelScope.launch {
-            val eventsList = calendarEventModel.readCalendarEvents(context).map { event ->
-                event.copy(formattedStartTime = formatDateTime(event.startTime)) // 格式化时间
-            }
-            _events.value = eventsList
-            TodayEventsWidgetProvider.notifyDataChanged(context)
-        }
-    }
-
-
-
-    // 删除事件
-    fun deleteEvent(context: Context, event: CalendarEvent) {
-        viewModelScope.launch {
-            val success = calendarEventModel.deleteEvent(context, event.id)
-            _isEventDeleted.value = success
-            if (success) {
-                // 事件删除后更新事件列表
-                _events.value = _events.value?.filter { it.id != event.id }
-                TodayEventsWidgetProvider.notifyDataChanged(context)
-            }
-        }
-    }
-
-    // 更新事件
-    // 更新事件
-    fun updateEvent(context: Context, event: CalendarEvent) {
-        viewModelScope.launch {
-            val success = calendarEventModel.updateEvent(context, event.id, event.title, event.startTime)
-            _isEventUpdated.value = success
-            if (success) {
-                // 更新事件列表
-                _events.value = _events.value?.map {
-                    if (it.id == event.id) {
-                        it.copy(title = event.title, startTime = event.startTime)
-                    } else {
-                        it
-                    }
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            runCatching {
+                calendarRepository.getEvents(appContext).map { event ->
+                    event.copy(formattedStartTime = formatDateTime(event.startTime))
                 }
-                TodayEventsWidgetProvider.notifyDataChanged(context)
+            }.onSuccess { events ->
+                _uiState.update { it.copy(isLoading = false, events = events, errorMessage = null) }
+                notifyWidget()
+            }.onFailure { throwable ->
+                _uiState.update { it.copy(isLoading = false, errorMessage = throwable.message) }
             }
         }
     }
 
-    // 添加事件（来自 AI 返回的 JSON 字符串）
-    fun addEventsFromContent(context: Context, contentString: String?) {
+    fun deleteEvent(event: CalendarEvent) {
         viewModelScope.launch {
-            val createdIds = calendarEventModel.addEventsFromContent(context, contentString)
-
-            // 如果有新增事件，则重新加载一次事件列表
-            if (createdIds.isNotEmpty()) {
-                loadEvents(context)
+            val success = calendarRepository.deleteEvent(appContext, event.id)
+            if (success) {
+                _uiState.update { state ->
+                    state.copy(events = state.events.filterNot { it.id == event.id })
+                }
+                notifyWidget()
             }
         }
     }
 
-    fun addEvent(context: Context, event: CalendarEvent) {
+    fun updateEvent(event: CalendarEvent) {
         viewModelScope.launch {
-            val newId = calendarEventModel.createEvent(context, event.title, event.startTime)
+            val success = calendarRepository.updateEvent(
+                appContext,
+                event.id,
+                event.title,
+                event.startTime
+            )
+            if (success) {
+                _uiState.update { state ->
+                    state.copy(
+                        events = state.events.map {
+                            if (it.id == event.id) {
+                                it.copy(
+                                    title = event.title,
+                                    startTime = event.startTime,
+                                    formattedStartTime = formatDateTime(event.startTime)
+                                )
+                            } else {
+                                it
+                            }
+                        }
+                    )
+                }
+                notifyWidget()
+            }
+        }
+    }
+
+    fun addEvent(event: CalendarEvent) {
+        viewModelScope.launch {
+            val newId = calendarRepository.createEvent(appContext, event.title, event.startTime)
             if (newId != null) {
-                loadEvents(context)
+                loadEvents()
             }
         }
     }
 
+    fun addEventsFromContent(contentString: String?) {
+        viewModelScope.launch {
+            val createdIds = calendarRepository.addEventsFromContent(appContext, contentString)
+            if (createdIds.isNotEmpty()) {
+                loadEvents()
+            }
+        }
+    }
 
+    fun generateEventsFromPrompt(prompt: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            val result = aiRepository.generateEvents(prompt)
+            result.fold(
+                onSuccess = { content ->
+                    addEventsFromContent(content)
+                },
+                onFailure = { throwable ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = throwable.message) }
+                }
+            )
+        }
+    }
+
+    private fun notifyWidget() {
+        TodayEventsWidgetProvider.notifyDataChanged(appContext)
+    }
 
     fun formatDateTime(timestamp: Long): String {
-        val sdf = SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) // 中文格式
+        val sdf = SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault())
         return sdf.format(Date(timestamp))
     }
 }

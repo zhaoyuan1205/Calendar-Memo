@@ -1,42 +1,54 @@
 package com.zhaoyuan.calendarmemo.viewmodel
 
 import android.app.Application
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
-import com.zhaoyuan.calendarmemo.voice.StreamingAsrEngine
+import com.zhaoyuan.calendarmemo.data.repository.VoiceRepository
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
-class VoiceEventViewModel(application: Application) : AndroidViewModel(application) {
+data class VoiceUiState(
+    val isListening: Boolean = false,
+    val transcript: String = "",
+    val errorMessage: String? = null
+)
 
-    private var _engine: StreamingAsrEngine? = null
-    val engine get() = _engine
+class VoiceEventViewModel(
+    application: Application,
+    private val voiceRepository: VoiceRepository
+) : AndroidViewModel(application) {
 
-    fun initEngine(onResult: (String) -> Unit) {
-        try {
-            _engine = StreamingAsrEngine(getApplication(), onResult)
-            _engine?.init()
-        } catch (e: Exception) {
-            Log.e("ASR", "初始化失败", e)
+    constructor(application: Application) : this(
+        application,
+        VoiceRepository()
+    )
+
+    private val _uiState = MutableStateFlow(VoiceUiState())
+    val uiState: StateFlow<VoiceUiState> = _uiState.asStateFlow()
+
+    fun initialize() {
+        voiceRepository.init(getApplication()) { text ->
+            _uiState.update { it.copy(transcript = text) }
         }
     }
 
-    fun startAsr() {
-        try {
-            _engine?.start()
-        } catch (e: Exception) {
-            Log.e("ASR", "启动失败", e)
-        }
+    fun startRecognition() {
+        voiceRepository.startRecognition()
+        _uiState.update { it.copy(isListening = true, errorMessage = null) }
     }
 
-    fun stopAsr() {
-        try {
-            _engine?.stop()
-        } catch (e: Exception) {
-            Log.e("ASR", "停止失败", e)
-        }
+    fun stopRecognition() {
+        voiceRepository.stopRecognition()
+        _uiState.update { it.copy(isListening = false) }
+    }
+
+    fun resetTranscript() {
+        _uiState.update { it.copy(transcript = "") }
     }
 
     override fun onCleared() {
-        _engine?.release()
+        voiceRepository.release()
         super.onCleared()
     }
 }
